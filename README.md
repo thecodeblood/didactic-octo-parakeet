@@ -6,6 +6,10 @@
 
 A ride-hailing platform connects riders with nearby drivers in real time. The system must handle real-time location ingestion at massive scale, sub-second driver matching, dynamic surge pricing, full trip lifecycle management, and reliable payment processing — all across multiple geographic regions.
 
+<img width="1798" height="784" alt="Image" src="https://github.com/user-attachments/assets/2e57e1eb-10a1-485d-aa20-8d53c7f180e0" />
+
+** Rough Sketch of HLD**
+
 ### 1.1 Functional Requirements
 - Ingest real-time driver location updates (1–2 updates/second per driver)
 - Allow riders to request rides with pickup, destination, tier, and payment method
@@ -397,6 +401,8 @@ CREATE TABLE location_history (
 
 The architecture is organized into five layers. All synchronous calls stay within a single region on the hot path. Kafka is the asynchronous backbone between all layers. The API Gateway is the sole client entry point.
 
+<img width="2652" height="1600" alt="Image" src="https://github.com/user-attachments/assets/371436fa-c9fd-4209-bb8d-758ddd91184c" />
+
 ### 5.1 Component Responsibilities
 
 | Service | Layer | Responsibility | Primary Storage |
@@ -449,6 +455,8 @@ The architecture is organized into five layers. All synchronous calls stay withi
 ## 6. Low-Level Design — Dispatch & Matching
 
 The Matching Service is the most latency-critical and consistency-critical component. It must find the best available driver within 1s p95 and guarantee no driver receives two simultaneous offers.
+
+<img width="2832" height="1504" alt="Image" src="https://github.com/user-attachments/assets/8963d255-9b35-403c-819c-78c296c89364" />
 
 ### 6.1 Redis Geo Index — Exact Commands
 
