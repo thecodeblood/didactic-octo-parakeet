@@ -332,6 +332,7 @@ Using CockroachDB / Postgres, partitioned by `region`.
 *   `dispatch_lock:{driver_id}` -> TTL 10s (prevents double dispatch)
 
 <img width="1230" height="739" alt="Image" src="https://github.com/user-attachments/assets/2614b6fd-7377-470c-a1b5-b09523cf41d4" />
+
 ---
 
 ## 3. High-Level Design (HLD)
@@ -374,6 +375,7 @@ Responsibilities:
 **Trip Service**
 
 <img width="1605" height="543" alt="Image" src="https://github.com/user-attachments/assets/fa721976-bfc7-4b9b-bfc3-521ff6a69b19" />
+
 Manages the **trip lifecycle state machine**.
 
 Responsibilities:
