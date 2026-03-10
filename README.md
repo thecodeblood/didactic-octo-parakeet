@@ -372,6 +372,8 @@ Responsibilities:
 - Apply surge multipliers
 
 **Trip Service**
+
+<img width="1605" height="543" alt="Image" src="https://github.com/user-attachments/assets/fa721976-bfc7-4b9b-bfc3-521ff6a69b19" />
 Manages the **trip lifecycle state machine**.
 
 Responsibilities:
