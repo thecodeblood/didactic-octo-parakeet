@@ -91,17 +91,6 @@ Before designing the architecture, we derive precise throughput numbers.
 | Availability | 99.95% | ~4.4 hours downtime/year |
 | Regions | 3 | Active-active (ap-south-1, ap-southeast-1, eu-west-1) |
 
-### Derived System Sizing
-| Component | Rationale | Capacity |
-|----------|----------|---------|
-| Kafka driver.location.updates | 500k msg/s | 512 partitions |
-| Redis Geo Index | 300k driver keys | ~60MB hot data |
-| WebSocket Connections | 600k connections | 20 pods |
-| Matching Service | 1000 req/s | 10 pods |
-| Trip DB (CockroachDB) | 20M trips/day | 3-node cluster |
-| Location History (Cassandra) | 500k writes/sec | 6-node cluster |
-| Surge Calculator | ~800 geo cells | 2 replicas |
-
 ---
 
 ## 1. APIs & System Interfaces
@@ -500,59 +489,210 @@ Kafka enables **high-throughput, fault-tolerant, and decoupled communication bet
 ### 3.2 Request Data Flow — Ride Request to Match
 This is the critical hot path. Every step must complete within the p95 budget.
 
-| Step | From → To | Protocol | Latency Budget |
-| :--- | :--- | :--- | :--- |
-| 1. Rider requests ride | Rider App → API Gateway | HTTPS/REST | ~20ms (TLS + auth) |
-| 2. Route to Ride Service | API Gateway → Ride Service | Internal HTTP/2 | ~5ms |
-| 3. Fetch surge multiplier | Ride Service → Redis (Surge Cache) | Redis GET | ~2ms |
-| 4. Write trip (SEARCHING) | Ride Service → CockroachDB + Outbox | SQL transaction | ~15ms |
-| 5. Publish `ride.requested` | Outbox Reader → Kafka | Kafka produce | ~5ms async |
-| 6. Trigger matching | Ride Service → Matching Service | Internal async (Kafka) | ~10ms |
-| 7. Geo query | Matching Service → Redis GeoSearch | GEORADIUS / ZRANGE | ~3ms |
-| 8. Acquire driver lock | Matching Service → Redis (SETNX) | Redis atomic | ~1ms |
-| 9. Push offer to driver | Matching Service → Connection Service → Driver App | WebSocket | ~15ms |
-| 10. Driver accepts | Driver App → API Gateway → Trip Service | HTTPS/REST | ~30ms |
-| 11. Update trip (MATCHED) | Trip Service → CockroachDB + Outbox | SQL transaction | ~15ms |
-| 12. Notify rider | Notification Service ← Kafka | WebSocket push | ~20ms async |
+| Step | From → To | Protocol |
+| :--- | :--- | :--- |
+| 1. Rider requests ride | Rider App → API Gateway | HTTPS/REST |
+| 2. Route to Ride Service | API Gateway → Ride Service | Internal HTTP/2 |
+| 3. Fetch surge multiplier | Ride Service → Redis (Surge Cache) | Redis GET |
+| 4. Write trip (SEARCHING) | Ride Service → CockroachDB + Outbox | SQL transaction |
+| 5. Publish `ride.requested` | Outbox Reader → Kafka | Kafka produce |
+| 6. Trigger matching | Ride Service → Matching Service | Internal async (Kafka) |
+| 7. Geo query | Matching Service → Redis GeoSearch | GEORADIUS / ZRANGE |
+| 8. Acquire driver lock | Matching Service → Redis (SETNX) | Redis atomic |
+| 9. Push offer to driver | Matching Service → Connection Service → Driver App | WebSocket |
+| 10. Driver accepts | Driver App → API Gateway → Trip Service | HTTPS/REST |
+| 11. Update trip (MATCHED) | Trip Service → CockroachDB + Outbox | SQL transaction |
+| 12. Notify rider | Notification Service ← Kafka | WebSocket push |
 
 **SLO:** Steps 1–9 (dispatch decision) complete in ~100ms p50, well within the 1s p95 budget. Steps 1–12 (end-to-end request→acceptance) complete in ~130ms p50, within the 3s p95 budget. The 15-second driver response window is the dominant factor in p95 — we mitigate this by immediately trying the next candidate on timeout.
 
 ### 3.3 Driver Location Ingestion Data Flow
-This is the highest-throughput path in the system: 500k writes/second globally.
 
-1. **Driver App** sends GPS frame over persistent WebSocket every 1–2 seconds: `{ driver_id, lat, lng, heading, speed, client_ts }`.
-2. **Connection Service** receives the frame, extracts `driver_id` from the authenticated WebSocket session, and forwards to **Location Service** via Kafka (`driver.location.updates` topic).
-3. **Location Service hot path**: Compute geohash; update Redis Geo Index (`GEOADD`); if driver status changed cell, remove from old cell. Apply latest-timestamp-wins — drop if `client_ts` < stored `ts`.
-4. **Location Service cold path**: Forward the raw event to Kafka. A separate Location History Consumer batches 500 events and bulk-writes to Cassandra with `driver_id` + `date` as partition key.
-5. **Location Service trip relay**: If driver is on an active trip (checked via Redis `driver:status:{id}`), look up rider's Connection Service instance in the Connection Registry and push the location update over the rider's WebSocket for live map tracking.
+Drivers continuously send location updates while they are online.
+
+1. The Driver App sends location updates over a persistent WebSocket connection: `{ driver_id, latitude, longitude, timestamp }`.
+2. The Connection Service receives the update and forwards it to the Location Service through Kafka (`driver.location.updates` topic).
+3. The Location Service updates the driver's latest location in the Redis Geo Index, which is used by the Matching Service to find nearby drivers quickly.
+4. The same location events are asynchronously stored in Cassandra for historical analysis.
+5. If the driver is currently serving a trip, the location update is forwarded through the Connection Service to the rider's app for real-time map tracking.
 
 ### 3.4 Scaling, Storage, and Trade-offs
-*   **Transactions (Trip & Payment)**: Use **CockroachDB (or Sharded Postgres)**. CockroachDB natively supports multi-region deployments with geo-partitioning. By partitioning trip tables by `region_id`, writes are entirely localized to the region without cross-region consensus, keeping latencies low. 
-*   **Location Ingestion & Fast Queries**: Use **Redis** for driver state and location (`GEOADD`, `GEORADIUS`). With 500k updates/sec, Redis must be clustered and partitioned by region or geohash. WebSockets or gRPC streams handle the ingestion.
-*   **Events**: Use **Kafka**. Partitioned by region and decoupled. It buffers location updates for stream processors (e.g., Flink) to compute aggregate supply per geohash for the Surge Pricing Service.
-*   **Multi-Region Strategy**: Active-Active per region. A ride request in US-East stays in US-East. There is no cross-region sync on the hot path. Async replication can sync aggregates to a global analytical platform.
 
-
+* Transactional data such as trips and payments are stored in a distributed SQL database like CockroachDB or sharded PostgreSQL.
+* Redis is used as an in-memory geo index for driver locations and dispatch queries, enabling low-latency driver lookup.
+* Kafka acts as an event streaming backbone between services and allows the system to handle high-throughput location updates.
+* The platform is deployed across multiple regions. Each region processes its own ride requests and driver updates to reduce latency.
 ---
 
 ## 4. Low-Level Design (LLD): Dispatch & Matching
 
-The Dispatch flow is critical because it must assign drivers within `p95 < 1s`. 
+The Dispatch/Matching component is the most latency-critical part of the ride-hailing system.
+Its goal is to find the best available driver for a rider request within **≤1s p95 latency**, while ensuring a driver cannot receive multiple simultaneous ride offers.
 
-### 4.1 Matching Algorithm
-1.  **Spatial Query**: Dispatch Service receives `pickup_lat`, `pickup_lon`. It computes the Geohash (e.g., precision 6) and queries the Redis Geo-Index for drivers within a 3km to 5km radius.
-2.  **Filter**: Exclude drivers whose state is not `AVAILABLE` or who don't match the requested tier (e.g., UberX vs Premium).
-3.  **Rank**: Use an in-memory ranking heuristic or a fast ML model (shadow inferred) that ranks candidates based on:
-    *   Straight-line distance (proxy for ETA).
-    *   Driver acceptance rate and preferences.
-    *   Direction of travel (to avoid U-turns).
-4.  **Offer Generation**: 
-    *   Perform an atomic check-and-set (CAS) or use a distributed lock in Redis to set the driver's status to `RESERVED` for `N` seconds (e.g., 10s).
-    *   If successful, send an offering dispatch event.
+The matching service performs spatial search, candidate ranking, driver reservation, and offer management.
 
-### 4.2 Concurrency & Reassignment
-*   **Locking**: To avoid assigning one driver to two riders simultaneously, Redis uses a Lua script or `SETNX` logic to atomically hold a lock.
-*   **Timeouts**: If the driver fails to respond in 10s, a Redis Key Expiry event or a Kafka delayed queue triggers a re-dispatch. The Dispatch Service fetches the next driver from the ranked list and repeats.
+### 4.1 Dispatch Flow
+
+When a rider creates a ride request, the following steps occur:
+
+1. **Ride Request Received**: The Ride Service publishes a `ride.requested` event. The Matching Service consumes the event and begins the dispatch process.
+2. **Spatial Query**: The pickup location is mapped to a geo-cell. Nearby drivers are queried from the in-memory geo index.
+3. **Candidate Filtering**: Drivers that are:
+    * offline
+    * currently in a trip
+    * incompatible with the ride tier
+    <br>...are removed from the candidate list.
+4. **Driver Ranking**: Remaining drivers are ranked using heuristics such as:
+    * distance to pickup
+    * driver rating
+    * acceptance rate
+    * current direction of travel
+5. **Driver Offer**: The top candidate driver receives a ride offer via WebSocket.
+6. **Driver Response**: Driver must accept within a response window (≈10–15 seconds).
+7. **Outcome Handling**:
+    * Accept → Trip Service confirms the match.
+    * Decline / Timeout → next candidate driver is offered the ride.
+8. **Search Expansion**: If no suitable drivers are found, the search radius expands gradually until a match is found or the request fails.
+
+### 4.2 Matching Algorithm
+
+The matching algorithm balances speed, fairness, and driver utilization.
+
+**Step 1 — Retrieve Nearby Drivers**
+Matching Service queries the geo index to retrieve nearby drivers within an initial radius (e.g., 3 km).
+
+**Step 2 — Filter Candidates**
+Drivers are filtered based on:
+* availability status
+* ride tier compatibility
+* recent activity (to avoid stale location data)
+
+**Step 3 — Rank Candidates**
+Drivers are ranked using a scoring function:
+```
+score = w1 * distance_to_pickup
+      + w2 * driver_rating_penalty
+      + w3 * acceptance_rate_penalty
+```
+Lower scores indicate better candidates.
+
+**Step 4 — Offer Ride**
+Drivers are offered rides sequentially based on ranking. If the driver does not respond within the offer window, the system moves to the next candidate.
+
+**Step 5 — Expand Search**
+If insufficient candidates are found, the search radius expands incrementally until a maximum limit is reached.
+
+### 4.3 Concurrency Control & Double Dispatch Prevention
+
+The system must ensure that a driver cannot be assigned to multiple riders simultaneously. Two mechanisms are used:
+
+**Distributed Driver Reservation**
+Before sending an offer, the Matching Service attempts to reserve the driver using a distributed lock. If the lock acquisition fails, the driver is already handling another request and is skipped.
+
+**Database State Validation**
+When a driver accepts the offer:
+1. The Trip Service performs an atomic state transition.
+2. The driver is marked as assigned to the trip.
+3. If another request already claimed the driver, the operation fails and the matching process continues.
+
+This dual approach ensures consistency while keeping dispatch latency low.
+
+### 4.4 Offer Lifecycle State Machine
+
+Each ride request progresses through an offer state machine during dispatch.
+
+| State | Description |
+| --- | --- |
+| **SEARCHING** | Ride request created and matching begins |
+| **OFFERING** | Ride offer sent to a candidate driver |
+| **MATCHED** | Driver accepted the ride |
+| **EXPANDING** | Search radius expanded due to insufficient drivers |
+| **FAILED** | No driver accepted within timeout window |
+
+**State Transitions**
+```
+SEARCHING → OFFERING → MATCHED
+                ↓
+           DECLINED/TIMEOUT
+                ↓
+            OFFER NEXT DRIVER
+                ↓
+            EXPANDING SEARCH
+```
+If the system fails to match a driver within an overall timeout window (e.g., 60 seconds), the rider is notified that no drivers are available.
+
+### 4.5 Handling Stale Driver Locations
+
+Drivers periodically send location updates while online. If the system stops receiving updates from a driver:
+* the driver is considered stale
+* the driver is excluded from matching queries
+* the driver's status is eventually updated to offline
+
+This prevents dispatching rides to drivers who have lost connectivity.
+
+### 4.6 Matching Service Crash Recovery
+
+The Matching Service is stateless and processes ride requests from the event stream. If a Matching Service instance fails:
+* Another instance in the consumer group takes over the event partition.
+* The matching state is reconstructed using cached dispatch state and trip status.
+* Driver reservations automatically expire after the offer window.
+
+This ensures dispatch continues without manual intervention.
+
+### 4.7 Dispatch Service Internal Components
+
+The Matching Service is composed of several internal components responsible for different parts of the dispatch process.
+
+**MatchingService**
+Coordinates the overall matching process. Implements logic to orchestrate driver search, rank candidates, send ride offers, and handle responses.
+```java
+class MatchingService {
+    GeoIndex geoIndex;
+    RankingService rankingService;
+    DispatchLockManager lockManager;
+    OfferService offerService;
+
+    matchRide(RideRequest request);
+}
+```
+
+**GeoIndex**
+Handles spatial driver lookup. Backed by an in-memory geo index (e.g., Redis).
+```java
+class GeoIndex {
+    List<DriverLocation> findNearbyDrivers(Location pickup, int radius);
+}
+```
+
+**RankingService**
+Ranks candidate drivers. Ranking signals include proximity, driver rating, and acceptance history.
+```java
+class RankingService {
+    List<Driver> rankDrivers(List<Driver> candidates, RideRequest request);
+}
+```
+
+**DispatchLockManager**
+Ensures drivers cannot receive multiple simultaneous offers. Implemented using a distributed lock in the caching layer.
+```java
+class DispatchLockManager {
+    boolean tryLockDriver(UUID driverId);
+    void releaseDriver(UUID driverId);
+}
+```
+
+**OfferService**
+Handles communication with drivers. Offers are delivered via the Connection Service using WebSocket connections.
+```java
+class OfferService {
+    void sendRideOffer(UUID driverId, RideRequest request);
+    void handleAccept(UUID driverId, UUID tripId);
+    void handleDecline(UUID driverId, UUID tripId);
+}
+```
+
+---
+
 
 ---
 
