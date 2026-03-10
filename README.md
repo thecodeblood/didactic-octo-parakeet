@@ -413,7 +413,7 @@ The architecture is organized into five layers. All synchronous calls stay withi
 | Routing Service | Support | Road-network graph; Dijkstra/A* for distance+ETA | In-memory graph |
 | Admin Service | Ops | Feature flags, kill-switches, per-region config, observability | CockroachDB: config |
 
-<img width="1605" height="543" alt="Image" src="https://github.com/user-attachments/assets/fa721976-bfc7-4b9b-bfc3-521ff6a69b19" />
+<img width="1565" height="580" alt="Image" src="https://github.com/user-attachments/assets/60566dfc-4472-4438-ac6b-8d5e88f6173f" />
 
 ### 5.2 Request Data Flow — Ride Request to Match
 
@@ -435,6 +435,8 @@ The architecture is organized into five layers. All synchronous calls stay withi
 **SLO:** Steps 1–9 complete in ~100ms p50 — well within 1s p95 dispatch budget. Steps 1–12 complete in ~130ms p50 — within 3s p95 E2E budget. The 15s driver response window dominates p95; mitigated by immediately trying the next candidate on timeout.
 
 ### 5.3 Driver Location Ingestion Flow
+
+<img width="1593" height="463" alt="Image" src="https://github.com/user-attachments/assets/23d5a166-aefc-4d57-9fce-2efcdeacced4" />
 
 1. Driver App sends GPS over persistent WebSocket every 1–2s: `{ driver_id, lat, lng, heading, speed, client_ts }`.
 2. Connection Service validates `client_ts` (±30s from server time) and forwards to Location Service via Kafka topic `driver.location.updates`.
@@ -587,6 +589,8 @@ class OfferService {
 ## 7. Surge Pricing Design
 
 Surge pricing dynamically multiplies the base fare when demand in a geographic cell significantly exceeds available driver supply.
+
+<img width="1373" height="678" alt="Image" src="https://github.com/user-attachments/assets/5ea839f9-ca51-4b08-9b4d-6ea5e4736566" />
 
 ### 7.1 H3 Geo-Cell Partitioning
 
