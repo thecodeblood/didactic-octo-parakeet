@@ -401,7 +401,7 @@ CREATE TABLE location_history (
 
 The architecture is organized into five layers. All synchronous calls stay within a single region on the hot path. Kafka is the asynchronous backbone between all layers. The API Gateway is the sole client entry point.
 
-<img width="2652" height="1600" alt="Image" src="https://github.com/user-attachments/assets/371436fa-c9fd-4209-bb8d-758ddd91184c" />
+<img width="1798" height="768" alt="Image" src="https://github.com/user-attachments/assets/c41d2b16-c137-4b04-8bd8-54ba129c3b96" />
 
 ### 5.1 Component Responsibilities
 
